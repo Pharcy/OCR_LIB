@@ -3,7 +3,7 @@ PARALLEL Batch PDF to Articles Processor
 Optimized version using multiprocessing for handling hundreds to thousands of files.
 
 This version parallelizes OCR processing for significant speed improvements.
-LLM calls remain serial due to Ollama limitations, but can be queued efficiently.
+LLM calls remain serial due to Ollama limitations
 
 Usage:
     python batch_pdf_to_articles_parallel.py <input_directory> [output_directory] [--workers N]
@@ -384,33 +384,3 @@ if __name__ == "__main__":
     main()
 
 
-# PERFORMANCE NOTES:
-# ==================
-# 
-# This parallel version provides significant speedup for the OCR phase:
-# - Single-threaded: ~60-120s per PDF
-# - 4 workers: ~15-30s per PDF (4x faster)
-# - 8 workers: ~7-15s per PDF (8x faster)
-#
-# The article extraction phase remains serial due to Ollama limitations.
-# To further optimize:
-# 
-# 1. Run multiple Ollama instances (advanced):
-#    - Start multiple Ollama servers on different ports
-#    - Distribute LLM calls across instances
-#    - Requires significant RAM (each instance needs ~4-8GB)
-#
-# 2. Batch processing strategy:
-#    - Run OCR on all files first (parallel)
-#    - Then run article extraction overnight (serial)
-#    - Use --skip-ocr flag on the serial version to reprocess
-#
-# 3. Use faster LLM models:
-#    - Smaller models trade accuracy for speed
-#    - Test different models on your content
-#
-# ESTIMATED TIMES FOR 1000 PDFs:
-# -------------------------------
-# Single-threaded script: 16-83 hours
-# This parallel script (4 workers): 4-21 hours
-# This parallel script (8 workers): 2-11 hours
