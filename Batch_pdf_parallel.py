@@ -134,64 +134,129 @@ class ParallelBatchProcessor:
     
     def process_articles_for_json(self, json_path: Path, relative_pdf_path: Path) -> Tuple[bool, int]:
         """
-        Process a single JSON file to extract articles.
-        This is done serially due to Ollama LLM limitations.
+        Process a single JSON file to extract articles, one page at a time.
+        Sending each page separately avoids context-length failures on large PDFs.
+        After all pages are processed, articles sharing the same title are merged.
         """
+        import re
+
         try:
             pdf_stem = relative_pdf_path.stem
             rel_dir = relative_pdf_path.parent
-            
+
             articles_subdir = self.articles_output_dir / rel_dir / pdf_stem
             articles_subdir.mkdir(parents=True, exist_ok=True)
-            
+
             # Load OCR JSON
             with open(json_path, 'r', encoding='utf-8') as f:
                 ocr_data = json.load(f)
-            
-            # Extract text
-            text_content = extract_text_from_json(ocr_data)
-            
-            if not text_content:
+
+            pages = ocr_data.get('pages', [])
+            if not pages:
+                # Fallback: single-text structure
+                text = ocr_data.get('text', '').strip()
+                if not text:
+                    return False, 0
+                pages = [{'text': text, 'page_number': 1}]
+
+            total_pages = ocr_data.get('total_pages', len(pages))
+            processed_date = ocr_data.get('processed_date', 'Unknown')
+
+            all_articles = []
+            article_counter = 1
+
+            for page in pages:
+                page_text = page.get('text', '').strip()
+                if not page_text:
+                    continue
+
+                page_num = page.get('page_number', '?')
+                print(f"    [ARTICLES] Page {page_num}/{total_pages} — calling LLM...")
+
+                source_metadata = {
+                    "source_file": str(relative_pdf_path),
+                    "total_pages": total_pages,
+                    "processed_date": processed_date,
+                    "page_number": page_num,
+                }
+
+                llm_response = call_ollama_llm(page_text)
+                if not llm_response:
+                    print(f"    [ARTICLES] ✗ No LLM response for page {page_num}, skipping")
+                    continue
+
+                page_articles = parse_articles(llm_response, source_metadata)
+
+                # Assign globally unique IDs and tag the source page
+                for article in page_articles:
+                    article['article_id'] = article_counter
+                    article['source_page'] = page_num
+                    article_counter += 1
+
+                all_articles.extend(page_articles)
+
+            if not all_articles:
                 return False, 0
-            
-            # Prepare source metadata
-            source_metadata = {
-                "source_file": str(relative_pdf_path),
-                "total_pages": ocr_data.get('total_pages', 'Unknown'),
-                "processed_date": ocr_data.get('processed_date', 'Unknown'),
-                "page_number": ocr_data.get('pages', [{}])[0].get('page_number', 1) if ocr_data.get('pages') else 1
-            }
-            
-            # Call LLM
-            llm_response = call_ollama_llm(text_content)
-            
-            if not llm_response:
-                return False, 0
-            
-            # Parse articles
-            articles = parse_articles(llm_response, source_metadata)
-            
-            if not articles:
-                return False, 0
-            
-            # Save articles
-            import re
-            for article in articles:
+
+            # Merge articles whose titles match across pages
+            merged_articles = self.merge_articles_by_title(all_articles)
+
+            # Save merged articles
+            for article in merged_articles:
                 safe_title = re.sub(r'[^\w\s-]', '', article['title'])
                 safe_title = re.sub(r'[-\s]+', '_', safe_title)
                 safe_title = safe_title[:50]
-                
+
                 filename = f"article_{article['article_id']:03d}_{safe_title}.json"
                 filepath = articles_subdir / filename
-                
+
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump(article, f, indent=2, ensure_ascii=False)
-            
-            return True, len(articles)
-            
+
+            return True, len(merged_articles)
+
         except Exception as e:
             print(f"    [ARTICLES] Error processing {json_path}: {str(e)}")
             return False, 0
+
+    @staticmethod
+    def merge_articles_by_title(articles: List[Dict]) -> List[Dict]:
+        """
+        Merge articles that share the same title (case-insensitive, whitespace-normalised).
+        Content from later pages is appended; source page numbers are accumulated.
+        Articles are re-numbered sequentially after merging.
+        """
+        import re
+
+        def normalize(title: str) -> str:
+            t = title.lower().strip()
+            return re.sub(r'\s+', ' ', t)
+
+        seen: Dict[str, int] = {}  # normalized title -> index in merged list
+        merged: List[Dict] = []
+
+        for article in articles:
+            key = normalize(article['title'])
+            if key in seen:
+                existing = merged[seen[key]]
+                # Append content separated by a blank line
+                existing['content'] = existing['content'].rstrip() + '\n\n' + article['content'].strip()
+                # Accumulate source pages
+                pages_list = existing.setdefault('source_pages', [existing.get('source_page')])
+                page = article.get('source_page')
+                if page not in pages_list:
+                    pages_list.append(page)
+            else:
+                copy = dict(article)
+                copy['source_pages'] = [article.get('source_page')]
+                seen[key] = len(merged)
+                merged.append(copy)
+
+        # Re-number after merging
+        for i, article in enumerate(merged, 1):
+            article['article_id'] = i
+
+        return merged
     
     def process_all(self):
         """Process all PDFs using parallel OCR and serial article extraction"""
